@@ -31,8 +31,11 @@ fn feap_get_min() {
     feap.insert((0, ()));
     assert!(*feap.get_min().unwrap().0 == 0);
 
-    feap.entries(&0).for_each(|e| e.delete());
-    assert!(*feap.get_min().unwrap().0 == 1);
+    #[cfg(feature = "entry")]
+    {
+        feap.entries(&0).for_each(|e| e.delete());
+        assert!(*feap.get_min().unwrap().0 == 1);
+    }
 }
 
 #[test]

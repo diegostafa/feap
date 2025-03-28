@@ -1,8 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    ptr::NonNull,
-};
+use std::{collections::HashMap, hash::Hash, ptr::NonNull};
+
+#[cfg(feature = "entry")]
+use std::collections::HashSet;
 
 /// A pointer to a node
 type NodePtr<K, V> = NonNull<Node<K, V>>;
@@ -16,6 +15,7 @@ pub struct Feap<K: PartialOrd + Eq + Hash, V> {
     /// The number of nodes in the heap
     len: usize,
 
+    #[cfg(feature = "entry")]
     /// A map from keys to nodes with that key
     nodes: HashMap<K, HashSet<NodePtr<K, V>>>,
 }
@@ -46,6 +46,7 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Feap<K, V> {
             .map(|root| unsafe { (&root.as_ref().key, &root.as_ref().val) })
     }
 
+    #[cfg(feature = "entry")]
     /// Return an entry to a the minimum element, if it exists
     pub fn min(&mut self) -> Option<Entry<K, V>> {
         self.root.map(|root| Entry {
@@ -54,6 +55,7 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Feap<K, V> {
         })
     }
 
+    #[cfg(feature = "entry")]
     /// Return an iterator over the entries with the given key
     pub fn entries<'a>(&'a mut self, key: &K) -> impl Iterator<Item = Entry<K, V>> + 'a {
         let feap = NonNull::new(self as *mut _).unwrap();
@@ -70,14 +72,15 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Feap<K, V> {
             (None, _) => other,
             (_, None) => self,
             (Some(this_root), Some(other_root)) => {
+                #[cfg(feature = "entry")]
                 for (k, v) in std::mem::take(&mut other.nodes) {
                     self.nodes.entry(k).or_default().extend(v);
                 }
-                Self {
-                    root: Some(naive_link(this_root, other_root)),
-                    len: self.len + other.len,
-                    nodes: std::mem::take(&mut self.nodes),
-                }
+                self.root = Some(naive_link(this_root, other_root));
+                self.len += other.len;
+                other.root = None; // avoid deallocating its nodes
+                other.len = 0;
+                self
             }
         }
     }
@@ -86,6 +89,7 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Feap<K, V> {
     pub fn insert(&mut self, (key, val): (K, V)) {
         let n = NonNull::from(Box::leak(Box::new(Node::new(key, val))));
         self.root = self.root.map_or(Some(n), |root| Some(naive_link(root, n)));
+        #[cfg(feature = "entry")]
         self.nodes.entry(key).or_default().insert(n);
         self.len += 1;
     }
@@ -112,6 +116,7 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Feap<K, V> {
                 }
 
                 let min = Box::from_raw(root.as_ptr());
+                #[cfg(feature = "entry")]
                 self.nodes.get_mut(&min.key).unwrap().remove(&root);
                 self.len -= 1;
                 return Some((min.key, min.val));
@@ -125,18 +130,41 @@ impl<K: PartialOrd + Eq + Hash, V> Default for Feap<K, V> {
         Self {
             root: Default::default(),
             len: Default::default(),
+            #[cfg(feature = "entry")]
             nodes: Default::default(),
         }
     }
 }
 impl<K: PartialOrd + Eq + Hash, V> Drop for Feap<K, V> {
     fn drop(&mut self) {
-        for node in self.nodes.values().flatten() {
-            unsafe { drop(Box::from_raw(node.as_ptr())) };
+        #[cfg(feature = "entry")]
+        {
+            fn drop_nodes_map<K: PartialOrd + Eq + Hash, V>(
+                nodes: &mut HashMap<K, HashSet<NodePtr<K, V>>>,
+            ) {
+                for node in nodes.values().flatten() {
+                    unsafe { drop(Box::from_raw(node.as_ptr())) };
+                }
+            }
+            drop_nodes_map(&mut self.nodes);
+        }
+
+        #[cfg(not(feature = "entry"))]
+        if let Some(root) = self.root {
+            fn drop_nodes_rec<K: PartialOrd + Eq + Hash, V>(node: NodePtr<K, V>) {
+                unsafe {
+                    for child in node.as_ref().children().collect::<Vec<_>>() {
+                        drop_nodes_rec(child);
+                    }
+                    drop(Box::from_raw(node.as_ptr()));
+                }
+            }
+            drop_nodes_rec(root);
         }
     }
 }
 
+#[cfg(feature = "entry")]
 /// An exclusive entry to a node in the heap for specific node operations
 #[derive(Debug)]
 pub struct Entry<K: PartialOrd + Eq + Hash + Copy, V> {
@@ -146,6 +174,7 @@ pub struct Entry<K: PartialOrd + Eq + Hash + Copy, V> {
     /// A pointer to the node
     node: NodePtr<K, V>,
 }
+#[cfg(feature = "entry")]
 impl<K: PartialOrd + Eq + Hash + Copy, V> Entry<K, V> {
     /// The key of the entry
     pub fn key(&self) -> &K {
@@ -175,6 +204,8 @@ impl<K: PartialOrd + Eq + Hash + Copy, V> Entry<K, V> {
             unsafe {
                 let key = self.node.as_ref().key;
                 assert!(new_key <= key);
+
+                #[cfg(feature = "entry")]
                 feap.nodes.entry(key).or_default().remove(&self.node);
                 feap.nodes.entry(new_key).or_default().insert(self.node);
                 self.node.as_mut().key = new_key;
@@ -195,6 +226,7 @@ struct Node<K: PartialOrd, V> {
     key: K,
     val: V,
     rank: u32,
+    #[cfg(feature = "entry")]
     is_marked: bool,
     parent: Option<NonNull<Self>>,
     first_child: Option<NonNull<Self>>,
@@ -207,6 +239,7 @@ impl<K: PartialOrd, V> Node<K, V> {
             key,
             val,
             rank: 0,
+            #[cfg(feature = "entry")]
             is_marked: false,
             parent: None,
             first_child: None,
@@ -214,6 +247,8 @@ impl<K: PartialOrd, V> Node<K, V> {
             next: None,
         }
     }
+
+    #[cfg(feature = "entry")]
     fn cascade_decrease_rank(&mut self) {
         if !self.is_marked {
             self.is_marked = !self.is_marked;
@@ -246,7 +281,8 @@ impl<K: PartialOrd, V> Iterator for NodeChildrenIterator<K, V> {
     }
 }
 
-/// Detaches a node from the heap
+#[cfg(feature = "entry")]
+/// Detach a node from the heap
 fn unlink<K: PartialOrd, V>(this: NodePtr<K, V>) -> NodePtr<K, V> {
     unsafe {
         if let Some(mut parent) = this.as_ref().parent {
@@ -264,7 +300,7 @@ fn unlink<K: PartialOrd, V>(this: NodePtr<K, V>) -> NodePtr<K, V> {
     }
 }
 
-// Links two nodes, while mantaining the heap invariant
+// Link two nodes, mantaining the heap invariant
 fn naive_link<K: PartialOrd, V>(this: NodePtr<K, V>, other: NodePtr<K, V>) -> NodePtr<K, V> {
     let this_node = unsafe { this.as_ref() };
     let other_node = unsafe { other.as_ref() };
@@ -276,7 +312,7 @@ fn naive_link<K: PartialOrd, V>(this: NodePtr<K, V>, other: NodePtr<K, V>) -> No
     }
 }
 
-// Naive links two nodes and updates the rank of the parent
+// Naive link two nodes and update the rank of the parent
 fn fair_link<K: PartialOrd, V>(this: NodePtr<K, V>, other: NodePtr<K, V>) -> NodePtr<K, V> {
     unsafe {
         assert_eq!(this.as_ref().rank, other.as_ref().rank);
@@ -286,7 +322,7 @@ fn fair_link<K: PartialOrd, V>(this: NodePtr<K, V>, other: NodePtr<K, V>) -> Nod
     }
 }
 
-// Inserts a node as the first child of another node, updating the pointers accordingly
+// Insert a node as the first child of another node, updating the pointers accordingly
 fn add_child<K: PartialOrd, V>(mut this: NodePtr<K, V>, mut other: NodePtr<K, V>) -> NodePtr<K, V> {
     unsafe {
         other.as_mut().parent = Some(this);
