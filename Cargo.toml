@@ -3,6 +3,10 @@ name = "feap"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["entry"]
-entry = []
+[dev-dependencies]
+criterion = "0.6.0"
+rand = "0.9.1"
+
+[[bench]]
+name = "benchmarks"
+harness = false
